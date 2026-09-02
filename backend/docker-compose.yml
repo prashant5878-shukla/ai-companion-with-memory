@@ -1,0 +1,24 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: companion-ai-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - companion_ai_mongo_data:/data/db
+
+  redis:
+    # redis-stack-server bundles RediSearch (HNSW vector index support), used only for the
+    # semantic response cache — durable memory stays in Mongo, this is a pure accelerator.
+    image: redis/redis-stack-server:latest
+    container_name: companion-ai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - companion_ai_redis_data:/data
+
+volumes:
+  companion_ai_mongo_data:
+  companion_ai_redis_data:
