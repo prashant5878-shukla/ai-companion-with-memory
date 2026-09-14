@@ -1,9 +1,18 @@
 # Companion-AI Core Loop
 
 A companion chatbot backend with a real memory architecture: structured + embedding-based
-retrieval, LLM-driven fact extraction, and contradiction/update handling — not a chatbot with
-a system prompt. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full design writeup
-(data flow, module map, decisions, limitations). This file is just setup/run instructions.
+retrieval, temporal-aware decay, LLM-driven fact extraction with an explicit memory policy, and
+contradiction/refinement reconciliation — not a chatbot with a system prompt. See
+[`PROBLEM.md`](./PROBLEM.md) for exactly what problem this solves (both the original assignment
+problem and the 12 specific gaps an external review later found), [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+for the full design writeup (data flow, module map, decisions, limitations), and
+[`FIXES_REPORT.md`](./FIXES_REPORT.md) for what changed and the real evaluation numbers behind
+each fix. This file is just setup/run instructions.
+
+**New here and the architecture doc feels dense?** [`docs/`](./docs/README.md) has four
+plain-language explainers — optimizations, retrieval scoring, conflict resolution, and persona
+consistency — each written for someone seeing this codebase for the first time, with a "how to
+see this yourself, live" section for every mechanism.
 
 Built with: Express + TypeScript (module-based, class-based), MongoDB (Docker) for durable
 memory, Redis Stack (Docker) for a semantic response cache, LangGraph for the extract/reconcile
@@ -76,9 +85,22 @@ totals, a breakdown by call type, cache hit rate, and the 20 most recent calls.
 npm run inspect-memory
 ```
 
-Dumps every stored fact (user + persona), active and superseded, with ids and supersede links —
-useful for confirming a contradiction actually flipped the old fact's status rather than just
-adding a duplicate.
+Dumps every stored fact (user + persona), active/superseded/expired, with ids and supersede
+links — useful for confirming a contradiction actually flipped the old fact's status rather than
+just adding a duplicate.
+
+### Automated evaluation
+
+```bash
+npm run eval                       # full run: persistence, retrieval, contradiction/refinement,
+                                    # baseline comparison, 50-turn x 3-run persona consistency
+npm run eval -- --turns 20 --runs 2   # faster smoke run
+```
+
+Runs a black-box eval suite against the real running backend (spawns/manages the server itself if
+one isn't already up) and writes a full JSON report to `backend/eval-results/`. See
+`ARCHITECTURE.md` §13 for what each suite measures and `FIXES_REPORT.md` #1 for a real run's
+numbers. This replaces the "no automated eval harness" gap the original submission had.
 
 ## What was tried and abandoned
 
@@ -138,8 +160,12 @@ same session correctly hit the cache (`cacheHit: true`, full reply in one shot, 
 and a genuinely new message in the same session correctly missed and generated fresh. Observability
 was verified the same way: `GET /api/metrics/summary` and the CLI's `/stats` correctly reflect
 calls made during testing, broken down by type, with plausible token counts and latencies (one
-real discrepancy found and fixed — see "what was tried and abandoned" above). A longer 30-50 turn
-drift-check run has not been done yet — worth doing before considering this fully validated.
+real discrepancy found and fixed — see "what was tried and abandoned" above).
+
+**A longer 50-turn x 3-run persona drift check, a retrieval-quality eval, a contradiction/
+refinement eval, and a full-system-vs-baseline comparison are now automated** — `npm run eval` —
+rather than manual/anecdotal. See `FIXES_REPORT.md` #1-#3 and #12 for the actual numbers from a
+real run and how each suite is constructed.
 
 ## Known limitations
 
@@ -161,17 +187,18 @@ drift-check run has not been done yet — worth doing before considering this fu
   filler), not general cost reduction. It also depends on Redis being reachable at boot; if it
   isn't, caching silently disables itself (logged once) rather than breaking the chat loop — see
   `RedisCache.connect()`.
-- The context hash keys on retrieved *fact ids*, not their content — so a fact that gets
-  **superseded** (a new id, `status: contradicts`) correctly busts the cache, since the id set
-  changes and a future lookup won't match. But a fact that gets **refined in place** (`same`/
-  `refines`, same id, updated `object`) does *not* change the hash — a near-duplicate query in that
-  narrow window could replay a reply generated before the refinement. Cache entries also expire
-  after 6 hours (TTL) regardless. Hashing on content, not just ids, is the fix if this proves to
-  matter in practice.
+- ~~The context hash keys on retrieved fact ids, not their content...~~ **Fixed** — the hash now
+  includes each retrieved fact's `object` alongside its id, so a fact refined in place busts the
+  cache the same way a superseded one does. See `FIXES_REPORT.md` #8.
 - Contradiction detection is per-candidate LLM classification, not a learned/calibrated model —
   it's only as good as Gemini's judgment on a single batched prompt, and has no human-in-the-loop
-  correction path if it misclassifies.
-- No automated eval harness (see the brief's §3) — it's a stretch goal and wasn't reached; testing
-  so far has been manual, multi-turn CLI runs plus direct `inspect-memory` checks against expected
-  supersede behavior.
+  correction path if it misclassifies. The `classifyRelations` prompt now gives explicit
+  refine-vs-contradict worked examples (`FIXES_REPORT.md` #10) to reduce the most common confusion,
+  measured by `npm run eval`'s reconciliation suite, but it's still a single LLM call's judgment.
+- The persona post-generation consistency check (`FIXES_REPORT.md` #6) adds one Gemini call to
+  every non-cached turn (and, on a flag, one more for the correction) — it hasn't been tuned for
+  false-positive rate beyond what the eval harness's persona suite reports.
+- The eval harness's relevance/contradiction judgments are keyword/substring-based, not an LLM
+  judge — deterministic and reproducible, but a correct answer phrased without the expected
+  substring scores as a miss. See `ARCHITECTURE.md` §13.
 - Single-user, single companion persona, no auth — all explicitly out of scope per the brief.

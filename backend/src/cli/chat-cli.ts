@@ -131,6 +131,9 @@ async function main() {
       const result = await client.sendStreaming(userText, (token) => process.stdout.write(token));
       process.stdout.write("\n");
       if (result.cacheHit) console.log("  (⚡ served from semantic cache)");
+      if (result.personaCheck.correctionApplied) {
+        console.log(`  (persona check caught a contradiction with "${result.personaCheck.conflictingFact}" and self-corrected)`);
+      }
       console.log();
     } catch (err) {
       console.error("\nSomething went wrong talking to the backend:", err);

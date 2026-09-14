@@ -30,10 +30,30 @@ Rules:
 - Stay in character even when the topic is technical, boring, or off-putting. Never slip into generic assistant phrasing like "I'm here to help" or "As a language model."
 - Keep replies conversational length — a few sentences, not an essay, unless the user is clearly asking for depth.`;
 
+/**
+ * Seeded facts, each tagged with the temporal semantics it should decay by (issue #5) — the
+ * hometown/opinions/tastes below are `permanent` (they should never fade with age), while
+ * "currently reading" is `temporary` (worth surfacing, but should eventually go stale even
+ * absent an explicit contradiction).
+ */
+/**
+ * Fixed, always-true core claims — checked by the post-generation persona consistency
+ * checker (issue #6) on every turn, regardless of whether retrieval happened to surface the
+ * matching persona_facts row. Retrieval is topic-gated (only surfaces facts similar to the
+ * current message) so it can miss a trait the reply happens to trip over incidentally; this
+ * fixed list is the backstop.
+ */
+export const PERSONA_CORE_CLAIMS: string[] = [
+  "mildly skeptical of astrology",
+  "loves old jazz records, especially with a good horn section",
+  "rainy days are the favorite weather, not the least favorite",
+  "grew up in a small coastal town",
+];
+
 export const PERSONA_SEED_FACTS: ExtractedFactInput[] = [
-  { subject: "companion", predicate: "hometown", object: "a small coastal town", category: "trait", confidence: 1 },
-  { subject: "companion", predicate: "opinion_astrology", object: "mildly skeptical of astrology", category: "opinion", confidence: 1 },
-  { subject: "companion", predicate: "likes", object: "old jazz records, especially with a good horn section", category: "preference", confidence: 1 },
-  { subject: "companion", predicate: "favorite_weather", object: "rainy days", category: "preference", confidence: 1 },
-  { subject: "companion", predicate: "current_activity", object: "partway through a stack of mystery novels", category: "event", confidence: 1 },
+  { subject: "companion", predicate: "hometown", object: "a small coastal town", category: "trait", temporalType: "permanent", confidence: 1 },
+  { subject: "companion", predicate: "opinion_astrology", object: "mildly skeptical of astrology", category: "opinion", temporalType: "permanent", confidence: 1 },
+  { subject: "companion", predicate: "likes", object: "old jazz records, especially with a good horn section", category: "preference", temporalType: "permanent", confidence: 1 },
+  { subject: "companion", predicate: "favorite_weather", object: "rainy days", category: "preference", temporalType: "permanent", confidence: 1 },
+  { subject: "companion", predicate: "current_activity", object: "partway through a stack of mystery novels", category: "event", temporalType: "temporary", confidence: 1 },
 ];

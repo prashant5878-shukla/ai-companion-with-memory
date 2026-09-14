@@ -8,13 +8,17 @@ export type FactCategory =
   | "trait"
   | "other";
 
+export type TemporalType = "permanent" | "ongoing" | "temporary" | "event";
+
 export interface RetrievedFact {
   id: string;
   subject: string;
   predicate: string;
   object: string;
   category: FactCategory;
+  temporalType: TemporalType;
   score: number;
+  updatedAt: string;
 }
 
 export interface StoredFact {
@@ -23,22 +27,41 @@ export interface StoredFact {
   predicate: string;
   object: string;
   category: FactCategory;
+  temporalType: TemporalType;
   confidence: number;
-  status: "active" | "superseded";
+  status: "active" | "superseded" | "expired";
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PersonaConsistencyResult {
+  checked: boolean;
+  consistent: boolean;
+  conflictingFact?: string;
+  reason?: string;
+  correctionApplied: boolean;
 }
 
 export interface ChatTurnResult {
   reply: string;
   retrievedFacts: RetrievedFact[];
-  newFacts: Array<{ subject: string; predicate: string; object: string; category: FactCategory; confidence: number }>;
+  retrievedPersonaFacts: RetrievedFact[];
+  newFacts: Array<{
+    subject: string;
+    predicate: string;
+    object: string;
+    category: FactCategory;
+    temporalType: TemporalType;
+    confidence: number;
+  }>;
   reconciliation: Array<{
     fact: { subject: string; predicate: string; object: string };
     relation: "same" | "refines" | "contradicts" | "unrelated" | "inserted";
     supersededFactId?: string;
   }>;
   cacheHit: boolean;
+  personaCheck: PersonaConsistencyResult;
+  mode: "full" | "baseline";
 }
 
 export interface ChatMessage {
@@ -48,7 +71,7 @@ export interface ChatMessage {
   cacheHit?: boolean;
 }
 
-export type LlmCallType = "chat" | "extract" | "classify" | "embed" | "cache_hit";
+export type LlmCallType = "chat" | "extract" | "classify" | "embed" | "cache_hit" | "persona_check" | "correction";
 
 export interface TypeBreakdown {
   type: LlmCallType;

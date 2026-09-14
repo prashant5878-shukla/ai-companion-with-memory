@@ -12,10 +12,11 @@ function FactRow({ fact }: { fact: StoredFact }) {
   return (
     <li className={`fact-row fact-${fact.status}`}>
       <span className="fact-category">{fact.category}</span>
+      <span className="fact-temporal">{fact.temporalType}</span>
       <span className="fact-text">
         <strong>{fact.predicate}</strong>: {fact.object}
       </span>
-      {fact.status === "superseded" && <span className="fact-badge">superseded</span>}
+      {fact.status !== "active" && <span className="fact-badge">{fact.status}</span>}
     </li>
   );
 }
@@ -36,6 +37,15 @@ export function MemoryPanel({ userFacts, personaFacts, lastTurn, loading, onRefr
       {lastTurn && (
         <section className="memory-section">
           <h3>Last turn</h3>
+          <p className="memory-hint">
+            Mode: {lastTurn.mode}
+            {lastTurn.personaCheck.checked &&
+              (lastTurn.personaCheck.consistent
+                ? " · persona check: consistent"
+                : lastTurn.personaCheck.correctionApplied
+                  ? ` · persona check: caught & corrected (${lastTurn.personaCheck.conflictingFact})`
+                  : ` · persona check: flagged (${lastTurn.personaCheck.conflictingFact})`)}
+          </p>
           {lastTurn.retrievedFacts.length > 0 ? (
             <>
               <p className="memory-hint">Retrieved into context:</p>

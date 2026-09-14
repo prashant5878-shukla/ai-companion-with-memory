@@ -7,6 +7,7 @@
     "server": "tsx watch src/server.ts",
     "cli": "tsx src/cli/chat-cli.ts",
     "inspect-memory": "tsx scripts/inspect-memory.ts",
+    "eval": "tsx scripts/eval/run-all.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit"
   },

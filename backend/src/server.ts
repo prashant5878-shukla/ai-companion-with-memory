@@ -23,6 +23,9 @@ import { MetricsRepository } from "./modules/observability/metrics.repository.js
 import { MetricsService } from "./modules/observability/metrics.service.js";
 import { MetricsController } from "./modules/observability/metrics.controller.js";
 import { metricsRoutes } from "./modules/observability/metrics.routes.js";
+import { TurnLogRepository } from "./modules/observability/turn-log.repository.js";
+import { TurnLogController } from "./modules/observability/turn-log.controller.js";
+import { turnLogRoutes } from "./modules/observability/turn-log.routes.js";
 
 const logger = new Logger("Server");
 
@@ -57,6 +60,8 @@ async function bootstrap() {
   const sessionRepo = new SessionRepository();
   const sessionService = new SessionService(sessionRepo);
 
+  const turnLogRepo = new TurnLogRepository();
+
   const chatGraphNodes = new ChatGraphNodes(userMemory, personaMemory);
   const chatService = new ChatService(
     sessionService,
@@ -66,11 +71,22 @@ async function bootstrap() {
     llm,
     cache,
     metrics,
+    turnLogRepo,
     chatGraphNodes
   );
   const chatController = new ChatController(chatService);
   const memoryController = new MemoryController(userFactRepo, personaFactRepo);
   const metricsController = new MetricsController(metrics);
+  const turnLogController = new TurnLogController(turnLogRepo);
+
+  // Temporary facts aren't deleted, just marked `expired` once stale — sweep hourly so
+  // retrieval doesn't have to re-check age-vs-temporalType on every single call. See
+  // MemoryRepository.expireStaleTemporary and FIXES_REPORT.md #5.
+  const TEMPORARY_FACT_MAX_AGE_DAYS = 14;
+  setInterval(() => {
+    void userFactRepo.expireStaleTemporary(TEMPORARY_FACT_MAX_AGE_DAYS);
+    void personaFactRepo.expireStaleTemporary(TEMPORARY_FACT_MAX_AGE_DAYS);
+  }, 60 * 60 * 1000);
 
   const app = express();
   app.use(cors());
@@ -78,6 +94,7 @@ async function bootstrap() {
   app.use("/api", chatRoutes(chatController));
   app.use("/api/memory", memoryRoutes(memoryController));
   app.use("/api/metrics", metricsRoutes(metricsController));
+  app.use("/api/turn-logs", turnLogRoutes(turnLogController));
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
   app.listen(env.port, () => {

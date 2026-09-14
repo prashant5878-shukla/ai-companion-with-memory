@@ -15,6 +15,7 @@ function toFloat32Buffer(vector: number[]): Buffer {
 
 interface RetrievedFactLike {
   id: string;
+  object: string;
 }
 
 /**
@@ -36,9 +37,19 @@ export class SemanticCacheService {
     return new SemanticCacheService(null);
   }
 
+  /**
+   * Content fingerprint, not just fact ids (fixes issue #8: a `refines`/`same` reconciliation
+   * updates a fact's `object` IN PLACE, same id — an id-only hash would silently miss that
+   * change and could replay a reply generated before the refinement). Hashing `id:object`
+   * pairs means any change to a fact's content — refined in place or superseded to a new id —
+   * changes the hash and correctly busts the cache. See FIXES_REPORT.md #8.
+   */
   static hashContext(userFacts: RetrievedFactLike[], personaFacts: RetrievedFactLike[]): string {
-    const ids = [...userFacts.map((f) => f.id), ...personaFacts.map((f) => f.id)].sort().join(",");
-    return createHash("sha1").update(ids).digest("hex");
+    const fingerprints = [...userFacts, ...personaFacts]
+      .map((f) => `${f.id}:${f.object}`)
+      .sort()
+      .join("|");
+    return createHash("sha1").update(fingerprints).digest("hex");
   }
 
   async ensureIndex(): Promise<void> {

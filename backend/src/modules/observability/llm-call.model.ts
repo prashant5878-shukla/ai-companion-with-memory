@@ -1,6 +1,14 @@
 import mongoose, { Schema, type InferSchemaType } from "mongoose";
 
-export const LLM_CALL_TYPES = ["chat", "extract", "classify", "embed", "cache_hit"] as const;
+export const LLM_CALL_TYPES = [
+  "chat",
+  "extract",
+  "classify",
+  "embed",
+  "cache_hit",
+  "persona_check",
+  "correction",
+] as const;
 export type LlmCallType = (typeof LLM_CALL_TYPES)[number];
 
 const llmCallSchema = new Schema(

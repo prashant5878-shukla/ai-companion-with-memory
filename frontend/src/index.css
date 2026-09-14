@@ -279,6 +279,22 @@ body {
   min-width: 0;
 }
 
+.fact-temporal {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  border: 1px solid var(--text-muted);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  flex-shrink: 0;
+}
+
+.fact-expired {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
 .fact-score {
   font-size: 0.7rem;
   color: var(--text-muted);

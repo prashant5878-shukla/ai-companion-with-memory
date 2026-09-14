@@ -85,14 +85,20 @@ Fact shape:
   predicate: string;      // short_snake_case, e.g. "relationship_status", "job_title"
   object: string;         // the value, e.g. "living with partner"
   category: "relationship" | "work" | "preference" | "plan" | "opinion" | "event" | "trait" | "other";
+  temporalType: "permanent" | "ongoing" | "temporary" | "event"; // decay semantics, see §4
   confidence: number;     // 0-1, from the extraction call
-  status: "active" | "superseded";
-  supersededBy: ObjectId | null;
+  status: "active" | "superseded" | "expired";
+  supersededBy: ObjectId | null;  // set when a newer fact contradicts this one
+  supersedes: ObjectId | null;    // back-link: which fact THIS one replaced (audit trail)
   sourceMessageId: ObjectId | null;
   embedding: number[];    // gemini-embedding-001, 3072 dims, over "subject predicate object"
   createdAt, updatedAt: Date;
 }
 ```
+
+`status: "expired"` and `temporalType` were added to fix a conflation the original design had between
+*recency* and *validity* (FIXES_REPORT.md #5): a fact being old isn't the same as a fact being less
+true. See §4.
 
 **Why hybrid (structured fields + embedding) instead of one or the other:** contradiction
 detection needs to compare *like with like* — you can't sensibly ask "does this contradict
@@ -120,9 +126,28 @@ the same text was embedded three times per turn; now it's one Gemini embedding c
 
 ```
 score = 0.65 * cosine_similarity(query, fact)
-      + 0.20 * exp(-ln2 * age_days / 30)      // recency half-life: 30 days
+      + 0.20 * recency(fact.temporalType, age_days)
       + 0.15 * fact.confidence
 ```
+
+**Recency is a relevance tie-breaker, not a validity signal (FIXES_REPORT.md #5).** The original
+version used one fixed 30-day half-life for every fact, which conflates "how likely is this to
+still matter" with "how likely is this to still be true" — a birthday doesn't get less true with
+age, but a "feeling stressed this week" note should. `recency()` now branches on the fact's
+`temporalType` (assigned at extraction time, see §5):
+
+| temporalType | half-life | rationale |
+|---|---|---|
+| `permanent` | none (recency pinned at 1.0) | birthday, hometown, family, core identity — never stale |
+| `ongoing` | 90 days | job, relationship status — true until explicitly superseded, so it should stay near-fully relevant for a long time |
+| `temporary` | 7 days | this week's mood, a short-term plan — should fade even without a contradiction |
+| `event` | 30 days | a specific happened/scheduled occurrence |
+
+`temporary` facts are additionally hard-expired by a background sweep
+(`MemoryRepository.expireStaleTemporary`, run hourly from `server.ts`) that flips them to
+`status: "expired"` after 14 days — `retrieve()` and `findActiveCandidates()` both only ever see
+`status: "active"`, so an expired fact stops surfacing in context and stops acting as a
+reconciliation candidate, without being deleted (still visible via `/api/memory/facts` for audit).
 
 Facts below a similarity floor (0.45) are dropped entirely before scoring — the recency/confidence
 terms only break ties among facts that are already topically relevant; they don't pull in
@@ -130,9 +155,18 @@ unrelated-but-recent facts. Top-K (default 6) survive per query, run separately 
 persona facts, so a topic-shift doesn't get crowded out by a flood of one-sided matches.
 
 This directly targets the brief's requirement: not dumping everything into context, and not
-missing something clearly relevant just because it's old.
+missing something clearly relevant just because it's old. Measured with `npm run eval` — see §13.
 
-## 5. Contradiction / update handling
+## 5. Extraction policy, contradiction, and refinement
+
+**What gets extracted at all (FIXES_REPORT.md #4).** `GeminiClient.extractFacts`'s prompt is an
+explicit allow/deny list, not a vague "extract durable facts" instruction: store stable identity,
+preferences held with real conviction, relationships, goals/plans (including short-term ones —
+worth storing is separate from how fast it decays, which is `temporalType`'s job, see §4), and
+significant events; never store greetings, jokes/sarcasm/hypotheticals, speculation, or — critical
+for persona integrity — anything said *by someone else about* the speaker. The common case is an
+empty `facts` array, and the prompt says so explicitly, to counteract the model's tendency to force
+a hit.
 
 Given a newly extracted fact and its same-subject/same-category candidates, one batched Gemini
 call (`GeminiClient.classifyRelations`) returns a relation per candidate:
@@ -140,11 +174,17 @@ call (`GeminiClient.classifyRelations`) returns a relation per candidate:
 - **`contradicts`** → insert the new fact as `active`; mark the old one `status: superseded`,
   `supersededBy: <new fact id>`. The old fact is never deleted — it stays for audit — but
   `retrieve()` only ever queries `status: "active"`, so it can't leak into a future reply.
-- **`same` / `refines`** → update the existing document's `object`/`confidence`/`updatedAt`
-  in place, rather than inserting a duplicate. ("I'm a nurse" then later "I'm a nurse at St.
-  Mary's" refines, it doesn't contradict.)
+- **`same` / `refines`** → update the existing document's `object`/`confidence`/`temporalType`/
+  `updatedAt` in place, rather than inserting a duplicate. ("I'm a developer" then later "I'm a
+  backend developer at Microsoft" refines, it doesn't contradict — the old statement isn't false,
+  just less complete. This distinction is stated explicitly in `classifyRelations`'s prompt with
+  worked examples, per FIXES_REPORT.md #10, precisely because refining and contradicting are easy
+  for a classifier to conflate: both involve "a new statement about something already known.")
 - **`unrelated`** → the candidate wasn't actually about the same thing; the new fact gets
   inserted as a fresh, independent fact.
+
+Either way the result is **one** consolidated active fact for that subject+predicate, never two —
+refining never creates a second row, and contradicting never leaves the old row retrievable.
 
 Worked example, matching the brief's own scenario:
 
@@ -165,7 +205,9 @@ extract → candidate-lookup → classify → reconcile path, just with `subject
 
 ## 6. Persona consistency
 
-Two mechanisms, deliberately redundant:
+Three mechanisms now, the third added specifically because the first two are both *prompt-side*
+biases — they make a contradiction less likely, they don't make one impossible
+(FIXES_REPORT.md #6):
 
 1. **A fixed system-prompt block** (`modules/persona/persona.data.ts`), injected on *every* call
    to `streamReply` regardless of topic — identity, backstory, voice rules, and explicit "don't
@@ -177,6 +219,27 @@ Two mechanisms, deliberately redundant:
    — self-contradiction across many turns on specifics (e.g., stating a hobby once, then a
    conflicting one 40 turns later) that a static prompt block alone wouldn't catch, since the
    static block only encodes what was decided up front, not what the model improvises later.
+3. **A post-generation consistency check** (`GeminiClient.checkPersonaConsistency`, called from
+   `ChatService.runPersonaCheck`): after the reply is generated, a second, independent LLM call
+   judges it against `PERSONA_CORE_CLAIMS` (a fixed backstop list, since retrieval is topic-gated
+   and can miss a trait the reply happens to trip over) plus whatever persona facts were actually
+   retrieved this turn. If it flags a genuine contradiction, `GeminiClient.generateCorrection`
+   produces a short in-character self-correction, which is streamed as a continuation and appended
+   to the stored/cached reply — **not** a full regeneration, because by the time the check
+   completes the original reply may already have been streamed to the client token-by-token, and
+   already-sent tokens can't be recalled. Revising forward (the way a person catches a slip of the
+   tongue mid-sentence) is the mechanism that's actually compatible with streaming; see
+   `ChatService.sendMessage` for where this sits relative to caching (the correction is folded into
+   what gets cached, so a cache hit later replays the corrected version). `personaCheck` is
+   returned on every `ChatTurnResult` and logged to `turn_logs` (§13) for failure analysis.
+
+**Persona facts should only ever be written by the persona's own words (FIXES_REPORT.md #7).**
+Before this fix, `ChatGraphNodes.extractFacts` ran persona-fact extraction over the *entire*
+exchange text ("User: ...\nWren: ..."), which meant a user statement *about* the companion (e.g.
+"you're such a nerd") could in principle get attributed to the companion as its own durable
+self-statement. Persona-fact extraction now runs over `${PERSONA_NAME}: ${reply}` only — the
+companion's own turn, nothing else — so there is no path from "something the user said" to a
+persona_facts row, structurally, not just via prompt instruction (see `chat.graph.ts`).
 
 ## 7. Module map (Express, class-based, module-per-domain)
 
@@ -316,14 +379,20 @@ used for fact retrieval (see §9 for why that inconsistency is intentional). `Se
 - `store(...)`: writes a new `cache:<uuid>` hash with a 6-hour TTL (`EXPIRE`) — this is a cache,
   entries are meant to fall out on their own, not be managed forever.
 - `hashContext(userFacts, personaFacts)`: a static helper — sorts and concatenates every retrieved
-  fact's id (both collections) and SHA-1 hashes it. This is what makes the cache safe to use in a
-  personalization-sensitive system: **the tag filter means a lookup can only ever match an entry
-  cached under an identical set of retrieved fact ids.** If the user's memory state is different in
-  any way that changes what got retrieved this turn, the contextHash changes, the tag filter
-  excludes every old entry, and it's a guaranteed miss — no stale personalized reply can leak
-  through. Combined with the 0.96 similarity floor and per-session scoping, this cache only ever
-  fires on genuine near-duplicates (repeated greetings, "thanks", "haha", filler) — see the
-  worked example below.
+  fact's **`id:object` pair** (both collections) and SHA-1 hashes it. This is what makes the cache
+  safe to use in a personalization-sensitive system: **the tag filter means a lookup can only ever
+  match an entry cached under an identical set of retrieved fact ids *and content*.** If the user's
+  memory state changed in any way that changes what got retrieved this turn — including a fact
+  refined **in place** (same id, `object` updated) — the contextHash changes, the tag filter
+  excludes every old entry, and it's a guaranteed miss.
+  **Fixed (FIXES_REPORT.md #8):** the original version hashed fact ids alone. A `refines`/`same`
+  reconciliation (§5) updates a fact's `object` on the same document id — an id-only hash couldn't
+  see that change and could replay a reply generated *before* the refinement, inside the narrow
+  window before the 6-hour TTL or a genuinely new retrieval set rotated it out. Hashing content
+  closes that window entirely, at the cost of nothing (the hash was already being recomputed every
+  turn either way). Combined with the 0.96 similarity floor and per-session scoping, this cache
+  only ever fires on genuine near-duplicates (repeated greetings, "thanks", "haha", filler) — see
+  the worked example below.
 - Both `RedisCache.connect()` and every `SemanticCacheService` method fail soft: if Redis isn't
   reachable at boot, `connect()` returns `null` (logged once) instead of throwing, `server.ts`
   substitutes `SemanticCacheService.disabled()`, and every method on it is a no-op — the chat loop
@@ -388,18 +457,66 @@ was tried and abandoned" for the debugging trail.
 `embedQuery` doesn't surface usage data through this SDK, so `embed`'s metrics row always has
 `promptTokens: 0`. Noted rather than worked around (would need dropping to a lower-level API call).
 
-## 12. Known gaps (see README for the full list)
+## 12. Failure analysis (turn logging)
 
-- No automated eval harness yet (brief §3, explicit stretch goal).
+FIXES_REPORT.md #11: aggregate eval scores alone don't tell you *why* a specific case failed.
+`ChatService.sendMessage` writes one row per turn to Mongo's `turn_logs` collection
+(`modules/observability/turn-log.model.ts`, via `TurnLogRepository`, fire-and-forget/fail-soft
+like `MetricsService`) capturing everything needed to reconstruct a turn after the fact: the
+retrieved user/persona facts *with their scores*, the reconciliation outcome for anything
+extracted, the persona-consistency check result (including whether a correction fired), the mode
+(`full`/`baseline`), cache-hit status, and the final reply actually shown. `GET
+/api/turn-logs?sessionId=...` serves it back. This is what the eval harness (§13) pulls to print
+concrete failing examples rather than just a pass rate, and what you'd open first to debug a
+specific bad reply reported by a user.
+
+## 13. Evaluation harness
+
+FIXES_REPORT.md #1: `npm run eval` (`backend/scripts/eval/run-all.ts`) runs an automated,
+repeatable suite against the **real running backend** (real Gemini, real Mongo/Redis — this is a
+black-box HTTP eval, not a mocked unit test) and writes a full JSON report to
+`backend/eval-results/`. It covers every empirical gap the review identified:
+
+| Suite | File | What it measures |
+|---|---|---|
+| Persistence | `run-persistence.ts` | Cross-session recall, and recall across an actual backend process restart (kills and respawns the server child process mid-test) |
+| Retrieval quality | `run-retrieval.ts` | Recall@K, mean Precision@K, MRR, broken down by direct/paraphrase/indirect/distractor-check query phrasing, over scenarios that each seed a target fact **and** a same-category distractor |
+| Contradiction / refinement | `run-reconciliation.ts` | Relation-classification accuracy, supersession accuracy (old fact correctly flips to `superseded`), and consolidation accuracy (refinement lands as one updated fact, not a duplicate) |
+| Full system vs. baseline | `run-baseline.ts` | The same recall scenarios run twice — once through the full memory pipeline, once in `baseline: true` mode (fixed persona prompt + raw recent-message window only, no retrieval) — with enough filler turns in between that the fact falls outside baseline's raw window |
+| Persona consistency | `run-persona.ts` | Configurable N-turn × R-run conversations (`--turns`, `--runs`; defaults 50×3) interleaving probe questions against `PERSONA_CORE_CLAIMS` with filler small talk; reports contradiction rate, variance across runs, and how often the post-generation checker (§6) caught and corrected a contradiction before it reached the report |
+
+**Test isolation** (`db-reset.ts`): memory here is deliberately global, not session-scoped (single-
+user system, per §9) — so without an explicit reset, facts planted by one suite would leak into
+candidate lookup and retrieval for the next one via `findActiveCandidates`. The harness clears
+`facts`/`sessions`/`messages`/`turn_logs` between suites and between independent persona-eval runs
+(preserving seeded persona facts, clearing only ones extracted during the run) so each suite's
+numbers reflect only its own scenarios.
+
+**Relevance judgments are keyword-based, not an LLM judge**, deliberately: each scenario is
+constructed so the correct answer contains a specific, distinctive substring (e.g. "nurse",
+"portugal", "earl grey"), which keeps the eval deterministic and reproducible run-to-run and avoids
+introducing a second LLM's judgment as a confound when evaluating the first one. This trades some
+recall (a correct-but-oddly-phrased reply could be marked a miss) for reproducibility; see
+`FIXES_REPORT.md` #1 for real numbers from a run and the tradeoff discussion.
+
+Run it with `cd backend && npm run eval` (add `--turns 20 --runs 2` for a faster smoke run, or
+`--no-server-management` to point it at a server you're already running via `EVAL_API_BASE`).
+
+## 14. Known gaps
+
 - Retrieval and generation are two Gemini calls; extraction/reconciliation add one or two more on
-  a cache miss — one Gemini call (embedding only) on a cache hit. No cross-turn batching.
+  a cache miss, plus the persona-consistency check (and, rarely, a correction) — one Gemini call
+  (embedding only) on a cache hit. No cross-turn batching.
 - Brute-force cosine similarity for fact retrieval doesn't scale past a few thousand facts per
   user (see §3) — the semantic response cache already avoids this by using RediSearch HNSW.
-- The cache's contextHash is built from retrieved fact *ids*, not their content, so a fact updated
-  in place (`same`/`refines`, same id) doesn't bust the cache the way a superseded fact (new id)
-  does — see the README's "Known limitations" for the precise failure window.
 - Streamed chat-reply token counts are a heuristic, not exact (see §11). `llm_calls` also has no
   retention/rotation policy — it grows unbounded with usage, same tradeoff as `messages`/`facts`.
 - No per-session or time-windowed metrics breakdown — `GET /api/metrics/summary` is all-time,
   across every session. Fine for a single-user prototype; a real multi-user deployment would need
   to scope this (which is itself out of scope per the brief).
+- The eval harness's relevance judgments are keyword/substring-based (see §13) rather than an LLM
+  judge — cheap and reproducible, but a correct answer phrased without the expected substring would
+  be scored a miss. Contradiction detection in `run-persona.ts` has the same property.
+- The persona consistency checker (§6) adds an LLM call (and, on a flag, a second) to every
+  non-cached turn; it hasn't been tuned for false-positive rate at scale beyond what `npm run eval`
+  reports for the scenarios it covers.

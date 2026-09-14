@@ -31,10 +31,17 @@ export class ChatGraphNodes {
   constructor(private readonly userMemory: MemoryService, private readonly personaMemory: MemoryService) {}
 
   extractFacts = async (state: ChatStateType): Promise<Partial<ChatStateType>> => {
-    const turnText = `User: ${state.userMessage}\n${PERSONA_NAME}: ${state.reply}`;
+    // User-fact extraction sees the full exchange (a user statement can be confirmed/clarified
+    // by the reply). Persona-fact extraction deliberately sees ONLY the companion's own reply
+    // text — never the user's turn — so a user statement ABOUT the companion (e.g. "you're such
+    // a nerd") can never be attributed to the persona as its own durable self-statement. Persona
+    // state should only ever be written by the persona's own first-person claims. See
+    // FIXES_REPORT.md #7.
+    const userTurnText = `User: ${state.userMessage}\n${PERSONA_NAME}: ${state.reply}`;
+    const personaTurnText = `${PERSONA_NAME}: ${state.reply}`;
     const [extractedUserFacts, extractedPersonaFacts] = await Promise.all([
-      this.userMemory.extractFacts(turnText, "user"),
-      this.personaMemory.extractFacts(turnText, "companion"),
+      this.userMemory.extractFacts(userTurnText, "user"),
+      this.personaMemory.extractFacts(personaTurnText, "companion"),
     ]);
     const [userHasCandidates, personaHasCandidates] = await Promise.all([
       this.userMemory.anyHaveCandidates(extractedUserFacts),
